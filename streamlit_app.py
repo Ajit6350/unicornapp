@@ -268,6 +268,17 @@ if 'model_info' not in st.session_state:
     st.session_state.model_info = None
 
 # -------------------- HELPER FUNCTIONS --------------------
+def test_connection():
+    """Test basic connectivity to backend."""
+    try:
+        r = requests.get(f"{API_BASE}/stats?game=Baccarat", timeout=5)
+        if r.status_code == 200:
+            st.success(f"✅ Backend reachable: {r.json()}")
+        else:
+            st.error(f"❌ Backend returned status {r.status_code}")
+    except Exception as e:
+        st.error(f"❌ Connection failed: {e}")
+
 def fetch_prediction():
     payload = {
         "history": st.session_state.history,
@@ -277,7 +288,8 @@ def fetch_prediction():
         "recent_results": st.session_state.recent_results
     }
     try:
-        resp = requests.post(f"{API_BASE}/predict", json=payload, timeout=30)
+        # Increase timeout to 60 seconds for first slow request
+        resp = requests.post(f"{API_BASE}/predict", json=payload, timeout=60)
         if resp.status_code == 200:
             data = resp.json()
             st.session_state.last_prediction = data
@@ -304,7 +316,7 @@ def fetch_dna():
 
 def fetch_stats():
     try:
-        resp = requests.get(f"{API_BASE}/stats", params={"game": st.session_state.game})
+        resp = requests.get(f"{API_BASE}/stats", params={"game": st.session_state.game}, timeout=10)
         if resp.status_code == 200:
             st.session_state.db_stats = resp.json()
         else:
@@ -376,7 +388,7 @@ def render_bead_plate(history, game: str):
 def reload_data():
     with st.spinner("Reloading data and retraining AI..."):
         try:
-            resp = requests.post(f"{API_BASE}/reload", json={"game": st.session_state.game})
+            resp = requests.post(f"{API_BASE}/reload", json={"game": st.session_state.game}, timeout=30)
             if resp.status_code == 200:
                 fetch_stats()
                 fetch_model_info()
@@ -389,7 +401,7 @@ def reload_data():
 def save_shoe():
     payload = {"history": st.session_state.history, "game": st.session_state.game}
     try:
-        resp = requests.post(f"{API_BASE}/save", json=payload)
+        resp = requests.post(f"{API_BASE}/save", json=payload, timeout=10)
         if resp.status_code == 200 and resp.json().get("success"):
             st.success("Shoe saved successfully!")
             fetch_stats()
@@ -598,6 +610,14 @@ with left_col:
             st.session_state.profit_loss_units = 0
             st.session_state.last_prediction = None
             st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Add a manual test connection button
+    with st.container():
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.subheader("🔌 Connection Test")
+        if st.button("Test Backend Connection"):
+            test_connection()
         st.markdown("</div>", unsafe_allow_html=True)
 
 # ==================== MIDDLE COLUMN (BEAD PLATE + BUTTONS) ====================
