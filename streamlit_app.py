@@ -1,7 +1,17 @@
 import streamlit as st
 import requests
+import threading
 
 API_BASE = "https://king63500-unicorn.hf.space"
+
+# ---- Silent keep-alive ping (prevents HF Space from sleeping) ----
+def _background_ping():
+    try:
+        requests.get(f"{API_BASE}/ping", timeout=5)
+    except Exception:
+        pass
+
+threading.Thread(target=_background_ping, daemon=True).start()
 
 st.set_page_config(page_title="🦄 Unicorn Pro", layout="wide")
 st.title("🦄 Unicorn Pro - AI Casino Assistant")
@@ -388,7 +398,7 @@ def render_bead_plate(history, game: str):
 def reload_data():
     with st.spinner("Reloading data and retraining AI..."):
         try:
-            resp = requests.post(f"{API_BASE}/reload", json={"game": st.session_state.game}, timeout=30)
+            resp = requests.post(f"{API_BASE}/reload?game={st.session_state.game}", timeout=30)
             if resp.status_code == 200:
                 fetch_stats()
                 fetch_model_info()
@@ -411,22 +421,37 @@ def save_shoe():
         st.error(f"Save error: {e}")
 
 def record_and_fetch(outcome):
-    if st.session_state.last_prediction and st.session_state.last_prediction.get('bet'):
-        last = st.session_state.last_prediction
-        bet = last.get('bet')
-        kelly_units = last.get('kelly_amount', 0)
+    last = st.session_state.last_prediction
+    if last and last.get('bet'):
+        bet = last['bet']
+        kelly = last.get('kelly_amount', 0)
+        game = st.session_state.game
+
         if outcome == bet:
-            if st.session_state.game == "Baccarat" and bet == 'B':
-                profit_units = kelly_units * 0.95
+            # Win
+            if game == "Baccarat" and bet == 'B':
+                profit = kelly * 0.95      # Banker commission
+            elif game == "Roulette" and bet == 'G':
+                profit = kelly * 35        # Green pays 35:1 (if you use it)
             else:
-                profit_units = kelly_units
-            st.session_state.profit_loss_units += profit_units
+                profit = kelly
+            st.session_state.profit_loss_units += profit
             st.session_state.recent_results.append(1)
-        elif outcome in ('T', 'G'):
+        elif game == "Baccarat" and outcome == 'T':
+            # Tie in Baccarat → push (no profit/loss)
             st.session_state.recent_results.append(2)
-        else:
-            st.session_state.profit_loss_units -= kelly_units
+        elif game == "Roulette" and outcome == 'G':
+            # Green outcome while betting on Red/Black → loss
+            st.session_state.profit_loss_units -= kelly
             st.session_state.recent_results.append(0)
+        else:
+            # Loss (including wrong colour in Roulette, or wrong player in Baccarat)
+            st.session_state.profit_loss_units -= kelly
+            st.session_state.recent_results.append(0)
+    else:
+        # No prediction → just record outcome (no P&L impact)
+        pass
+
     st.session_state.history.append(outcome)
     fetch_prediction()
     fetch_dna()
@@ -719,7 +744,13 @@ with right_col:
 
             with st.expander("🧠 AI Models", expanded=True):
                 st.write(f"**RF Pattern AI:** {data.get('ai_pred', 'None')} (Conf: {data.get('ai_conf', 0):.1f}%)")
-                st.write(f"**LSTM:** {'Enabled' if st.session_state.use_lstm else 'Disabled'}")
+                # LSTM info
+                lstm_pred = data.get('lstm_pred')
+                lstm_conf = data.get('lstm_conf', 0.0)
+                if lstm_pred is not None:
+                    st.write(f"**LSTM:** {lstm_pred} (Conf: {lstm_conf:.1f}%)")
+                else:
+                    st.write(f"**LSTM:** {'Enabled' if st.session_state.use_lstm else 'Disabled'}")
             ai_msg = data.get('ai_msg', 'N/A')
             st.info(f"🤖 Q-Learning: {ai_msg}")
             st.markdown("</div>", unsafe_allow_html=True)
@@ -734,11 +765,15 @@ with right_col:
                     last = st.session_state.last_prediction
                     kelly_units = last.get('kelly_amount', 0)
                     if kelly_units > 0:
-                        if st.session_state.game == "Baccarat":
-                            profit_units = kelly_units * 0.95 if last.get('bet') == 'B' else kelly_units
+                        game = st.session_state.game
+                        bet = last.get('bet')
+                        if game == "Baccarat" and bet == 'B':
+                            profit = kelly_units * 0.95
+                        elif game == "Roulette" and bet == 'G':
+                            profit = kelly_units * 35
                         else:
-                            profit_units = kelly_units
-                        st.session_state.profit_loss_units += profit_units
+                            profit = kelly_units
+                        st.session_state.profit_loss_units += profit
                         st.session_state.recent_results.append(1)
                 st.rerun()
         with col_l:
@@ -749,7 +784,11 @@ with right_col:
                     st.session_state.recent_results.append(0)
                 st.rerun()
         with col_tie:
-            if st.button("🔄 Tie", use_container_width=True):
-                st.session_state.recent_results.append(2)
-                st.rerun()
+            if st.session_state.game == "Baccarat":
+                if st.button("🔄 Tie", use_container_width=True):
+                    st.session_state.recent_results.append(2)
+                    st.rerun()
+            else:
+                # Optionally leave an empty placeholder to keep column layout
+                st.empty()
         st.markdown("</div>", unsafe_allow_html=True)
