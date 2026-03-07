@@ -96,33 +96,6 @@ st.markdown(
     background: linear-gradient(135deg, #764ba2, #667eea);
   }
 
-  /* ---------- Outcome Buttons (custom) ---------- */
-  .outcome-buttons {
-    display: flex;
-    gap: 12px;
-    margin-bottom: 20px;
-  }
-  .outcome-btn {
-    flex: 1;
-    border: none;
-    border-radius: 40px;
-    padding: 1rem 0;
-    font-weight: 800;
-    font-size: 1.4rem;
-    color: white;
-    cursor: pointer;
-    transition: all 0.2s;
-    box-shadow: 0 4px 10px rgba(0,0,0,0.3);
-    text-align: center;
-  }
-  .outcome-btn:hover {
-    transform: scale(1.05);
-    filter: brightness(1.1);
-  }
-  .btn-baccarat-b, .btn-roulette-r { background: linear-gradient(145deg, #ff4d4d, #cc0000); }
-  .btn-baccarat-p, .btn-roulette-b { background: linear-gradient(145deg, #4d79ff, #003399); }
-  .btn-baccarat-t, .btn-roulette-g { background: linear-gradient(145deg, #5cd65c, #008000); }
-
   /* ---------- Bead Plate ---------- */
   .bead-plate-scroll {
     max-width: 100%;
@@ -159,13 +132,6 @@ st.markdown(
     transform: scale(1.1);
     z-index: 2;
   }
-  .bead-baccarat-b { background: radial-gradient(circle at 30% 30%, #ff9999, #ff4d4d); }
-  .bead-baccarat-p { background: radial-gradient(circle at 30% 30%, #99c2ff, #4d79ff); }
-  .bead-baccarat-t { background: radial-gradient(circle at 30% 30%, #b3ffb3, #5cd65c); }
-  .bead-roulette-r { background: radial-gradient(circle at 30% 30%, #ff9999, #ff4d4d); }
-  .bead-roulette-b { background: radial-gradient(circle at 30% 30%, #666666, #333333); }
-  .bead-roulette-g { background: radial-gradient(circle at 30% 30%, #b3ffb3, #5cd65c); }
-  .bead-unknown { background: #888; }
 
   /* ---------- Metric Cards ---------- */
   .metric-card {
@@ -258,8 +224,16 @@ if 'profit_loss_units' not in st.session_state:
     st.session_state.profit_loss_units = 0
 if 'recent_results' not in st.session_state:
     st.session_state.recent_results = []
+if 'provider' not in st.session_state:
+    st.session_state.provider = None
 if 'game' not in st.session_state:
-    st.session_state.game = "Baccarat"
+    st.session_state.game = None
+if 'game_id' not in st.session_state:
+    st.session_state.game_id = None
+if 'game_cfg' not in st.session_state:
+    st.session_state.game_cfg = None   # full cfg dict from /games
+if 'games_config' not in st.session_state:
+    st.session_state.games_config = {}  # {provider: [{id, name, button_labels, colors}, ...]}
 if 'last_prediction' not in st.session_state:
     st.session_state.last_prediction = None
 if 'db_stats' not in st.session_state:
@@ -277,11 +251,34 @@ if 'health' not in st.session_state:
 if 'model_info' not in st.session_state:
     st.session_state.model_info = None
 
+# Optimization: Connection Pooling for faster API calls
+if 'http_session' not in st.session_state:
+    st.session_state.http_session = requests.Session()
+if 'model_info' not in st.session_state:
+    st.session_state.model_info = None
+
 # -------------------- HELPER FUNCTIONS --------------------
+
+def fetch_games():
+    """Call GET /games and populate games_config session state."""
+    try:
+        resp = st.session_state.http_session.get(f"{API_BASE}/games", timeout=10)
+        if resp.status_code == 200:
+            st.session_state.games_config = resp.json()
+        else:
+            st.session_state.games_config = {}
+    except Exception as e:
+        st.session_state.games_config = {}
+        st.error(f"Failed to fetch games: {e}")
+
+def get_current_cfg():
+    """Return the current game config dict, or None if not selected."""
+    return st.session_state.game_cfg
+
 def test_connection():
     """Test basic connectivity to backend."""
     try:
-        r = requests.get(f"{API_BASE}/stats?game=Baccarat", timeout=5)
+        r = requests.get(f"{API_BASE}/ping", timeout=5)
         if r.status_code == 200:
             st.success(f"✅ Backend reachable: {r.json()}")
         else:
@@ -290,32 +287,38 @@ def test_connection():
         st.error(f"❌ Connection failed: {e}")
 
 def fetch_prediction():
+    if not st.session_state.game_id:
+        return
     payload = {
+        "game_id": st.session_state.game_id,
         "history": st.session_state.history,
-        "game": st.session_state.game,
         "base_bet": st.session_state.base_bet,
         "use_lstm": st.session_state.use_lstm,
         "recent_results": st.session_state.recent_results
     }
     try:
-        # Increase timeout to 60 seconds for first slow request
-        resp = requests.post(f"{API_BASE}/predict", json=payload, timeout=60)
+        resp = st.session_state.http_session.post(f"{API_BASE}/predict", json=payload, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             st.session_state.last_prediction = data
             if 'debug_info' in data and 'window' in data['debug_info']:
                 st.session_state.window = data['debug_info']['window']
         else:
-            st.warning(f"Prediction API returned {resp.status_code}")
+            st.warning(f"Prediction API returned {resp.status_code}: {resp.text[:200]}")
             st.session_state.last_prediction = None
     except Exception as e:
         st.error(f"Prediction error: {e}")
         st.session_state.last_prediction = None
 
 def fetch_dna():
-    payload = {"history": st.session_state.history, "game": st.session_state.game}
+    if not st.session_state.game_id:
+        return
+    payload = {
+        "game_id": st.session_state.game_id,
+        "history": st.session_state.history
+    }
     try:
-        resp = requests.post(f"{API_BASE}/dna", json=payload, timeout=10)
+        resp = st.session_state.http_session.post(f"{API_BASE}/dna", json=payload, timeout=10)
         if resp.status_code == 200:
             st.session_state.dna_stats = resp.json()
         else:
@@ -325,18 +328,24 @@ def fetch_dna():
         st.session_state.dna_stats = {"streak": {}, "zigzag": {}}
 
 def fetch_stats():
+    if not st.session_state.game_id:
+        return
     try:
-        resp = requests.get(f"{API_BASE}/stats", params={"game": st.session_state.game}, timeout=10)
+        resp = st.session_state.http_session.get(
+            f"{API_BASE}/stats",
+            params={"game_id": st.session_state.game_id},
+            timeout=10
+        )
         if resp.status_code == 200:
             st.session_state.db_stats = resp.json()
         else:
             st.session_state.db_stats = {"shoes": 0, "hands": 0, "status": False}
-    except:
+    except Exception:
         st.session_state.db_stats = {"shoes": 0, "hands": 0, "status": False}
 
 def fetch_health():
     try:
-        resp = requests.get(f"{API_BASE}/health", timeout=10)
+        resp = st.session_state.http_session.get(f"{API_BASE}/health", timeout=10)
         if resp.status_code == 200:
             st.session_state.health = resp.json()
         else:
@@ -352,7 +361,7 @@ def fetch_health():
 
 def fetch_model_info():
     try:
-        resp = requests.get(f"{API_BASE}/model_info", timeout=10)
+        resp = st.session_state.http_session.get(f"{API_BASE}/model_info", timeout=10)
         if resp.status_code == 200:
             st.session_state.model_info = resp.json()
         else:
@@ -360,32 +369,54 @@ def fetch_model_info():
     except Exception:
         st.session_state.model_info = None
 
-def _bead_css_class(outcome: str, game: str) -> str:
-    base = "bead"
-    if game == "Roulette":
-        if outcome == "R":
-            return f"{base} bead-roulette-r"
-        if outcome == "B":
-            return f"{base} bead-roulette-b"
-        if outcome == "G":
-            return f"{base} bead-roulette-g"
-        return f"{base} bead-unknown"
-    if outcome == "B":
-        return f"{base} bead-baccarat-b"
-    if outcome == "P":
-        return f"{base} bead-baccarat-p"
-    if outcome == "T":
-        return f"{base} bead-baccarat-t"
-    return f"{base} bead-unknown"
+def reload_data():
+    with st.spinner("Reloading data and retraining AI..."):
+        try:
+            resp = st.session_state.http_session.post(
+                f"{API_BASE}/train",
+                json={"game_id": st.session_state.game_id},
+                timeout=120
+            )
+            if resp.status_code == 200:
+                fetch_stats()
+                fetch_model_info()
+                st.success("Data reloaded and AI retrained!")
+            else:
+                st.error(f"Reload failed: {resp.status_code} - {resp.text[:200]}")
+        except Exception as e:
+            st.error(f"Reload error: {e}")
 
-def render_bead_plate(history, game: str):
+def save_shoe():
+    if not st.session_state.history:
+        st.warning("No hands to save.")
+        return
+    payload = {
+        "game_id": st.session_state.game_id,
+        "history": st.session_state.history
+    }
+    try:
+        resp = st.session_state.http_session.post(f"{API_BASE}/save", json=payload, timeout=30)
+        if resp.status_code == 200 and resp.json().get("success"):
+            st.success(f"Shoe saved! New shoe ID: {resp.json().get('new_shoe_id', '?')}")
+            fetch_stats()
+        else:
+            st.error(f"Save failed: {resp.text[:200]}")
+    except Exception as e:
+        st.error(f"Save error: {e}")
+
+def render_bead_plate(history, cfg):
+    """Render bead plate using colors from game config."""
     if not history:
         st.info("No hands yet. Click the buttons below to start.")
         return
+    colors = cfg.get('colors', {}) if cfg else {}
     beads = []
     for outcome in history:
-        cls = _bead_css_class(outcome, game)
-        beads.append(f"<div class='{cls}' title='{outcome}'>{outcome}</div>")
+        color = colors.get(outcome, '#888888')
+        beads.append(
+            f"<div class='bead' style='background: radial-gradient(circle at 30% 30%, {color}cc, {color});' "
+            f"title='{outcome}'>{outcome}</div>"
+        )
     html = f"""
     <div class='bead-plate-scroll'>
         <div class='bead-plate'>
@@ -395,62 +426,34 @@ def render_bead_plate(history, game: str):
     """
     st.markdown(html, unsafe_allow_html=True)
 
-def reload_data():
-    with st.spinner("Reloading data and retraining AI..."):
-        try:
-            resp = requests.post(f"{API_BASE}/reload?game={st.session_state.game}", timeout=30)
-            if resp.status_code == 200:
-                fetch_stats()
-                fetch_model_info()
-                st.success("Data reloaded and AI retrained!")
-            else:
-                st.error(f"Reload failed with status {resp.status_code}")
-        except Exception as e:
-            st.error(f"Reload error: {e}")
-
-def save_shoe():
-    payload = {"history": st.session_state.history, "game": st.session_state.game}
-    try:
-        resp = requests.post(f"{API_BASE}/save", json=payload, timeout=10)
-        if resp.status_code == 200 and resp.json().get("success"):
-            st.success("Shoe saved successfully!")
-            fetch_stats()
-        else:
-            st.error("Save failed")
-    except Exception as e:
-        st.error(f"Save error: {e}")
-
 def record_and_fetch(outcome):
+    """Record outcome, update P&L, fetch new prediction."""
     last = st.session_state.last_prediction
     if last and last.get('bet'):
         bet = last['bet']
         kelly = last.get('kelly_amount', 0)
-        game = st.session_state.game
-
         if outcome == bet:
-            # Win
-            if game == "Baccarat" and bet == 'B':
-                profit = kelly * 0.95      # Banker commission
-            elif game == "Roulette" and bet == 'G':
-                profit = kelly * 35        # Green pays 35:1 (if you use it)
+            # Win — Banker commission only for Baccarat-like games
+            cfg = get_current_cfg()
+            allowed = cfg.get('allowed_chars', []) if cfg else []
+            if bet == allowed[0] if allowed else False:  # First symbol = Banker equivalent
+                profit = kelly * 0.95
             else:
                 profit = kelly
             st.session_state.profit_loss_units += profit
             st.session_state.recent_results.append(1)
-        elif game == "Baccarat" and outcome == 'T':
-            # Tie in Baccarat → push (no profit/loss)
-            st.session_state.recent_results.append(2)
-        elif game == "Roulette" and outcome == 'G':
-            # Green outcome while betting on Red/Black → loss
-            st.session_state.profit_loss_units -= kelly
-            st.session_state.recent_results.append(0)
         else:
-            # Loss (including wrong colour in Roulette, or wrong player in Baccarat)
-            st.session_state.profit_loss_units -= kelly
-            st.session_state.recent_results.append(0)
+            # Check for push/tie: if outcome is the 3rd symbol and game has 3 symbols
+            cfg = get_current_cfg()
+            allowed = cfg.get('allowed_chars', []) if cfg else []
+            if len(allowed) >= 3 and outcome == allowed[2]:
+                # 3rd symbol = Tie/Push in baccarat, Green in roulette → push (no P&L)
+                st.session_state.recent_results.append(2)
+            else:
+                st.session_state.profit_loss_units -= kelly
+                st.session_state.recent_results.append(0)
     else:
-        # No prediction → just record outcome (no P&L impact)
-        pass
+        pass  # No prediction → just record outcome
 
     st.session_state.history.append(outcome)
     fetch_prediction()
@@ -474,12 +477,32 @@ def get_loss_streak():
             break
     return streak
 
+def reset_shoe_state():
+    """Reset per-shoe session state when game changes."""
+    st.session_state.history = []
+    st.session_state.recent_results = []
+    st.session_state.profit_loss_units = 0
+    st.session_state.last_prediction = None
+    st.session_state.dna_stats = {"streak": {}, "zigzag": {}}
+
 # -------------------- INITIAL FETCH --------------------
 fetch_health()
+if not st.session_state.games_config:
+    fetch_games()
 if st.session_state.db_stats['shoes'] == 0:
     fetch_stats()
 if st.session_state.model_info is None:
     fetch_model_info()
+
+# Set a default provider/game if not set yet and games_config is available
+if st.session_state.games_config and st.session_state.provider is None:
+    first_provider = list(st.session_state.games_config.keys())[0]
+    first_game = st.session_state.games_config[first_provider][0]
+    st.session_state.provider = first_provider
+    st.session_state.game = first_game['name']
+    st.session_state.game_id = first_game['id']
+    st.session_state.game_cfg = first_game
+    fetch_stats()
 
 # -------------------- HEALTH INDICATOR --------------------
 health = st.session_state.get("health", {})
@@ -507,16 +530,52 @@ with left_col:
     with st.container():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.header("🎮 Game Selection")
-        game = st.selectbox("Game", ["Baccarat", "Roulette"], key="game_selector")
-        if game != st.session_state.game:
-            st.session_state.game = game
-            st.session_state.history = []
-            st.session_state.recent_results = []
-            st.session_state.profit_loss_units = 0
-            st.session_state.last_prediction = None
-            fetch_stats()
-            fetch_model_info()
-            st.rerun()
+
+        games_config = st.session_state.games_config
+
+        if not games_config:
+            st.warning("⚠️ Could not load games from backend. Click to retry.")
+            if st.button("🔄 Retry Loading Games"):
+                fetch_games()
+                st.rerun()
+        else:
+            # Provider selector
+            providers = list(games_config.keys())
+            current_provider = st.session_state.provider if st.session_state.provider in providers else providers[0]
+            selected_provider = st.selectbox(
+                "Provider",
+                providers,
+                index=providers.index(current_provider),
+                key="provider_selector"
+            )
+
+            # Game selector filtered by provider
+            provider_games = games_config.get(selected_provider, [])
+            game_names = [g['name'] for g in provider_games]
+            current_game_name = st.session_state.game if (st.session_state.game in game_names and st.session_state.provider == selected_provider) else game_names[0]
+            selected_game_name = st.selectbox(
+                "Game",
+                game_names,
+                index=game_names.index(current_game_name) if current_game_name in game_names else 0,
+                key="game_selector"
+            )
+
+            # Find the full game cfg for the selected game
+            selected_game_obj = next((g for g in provider_games if g['name'] == selected_game_name), None)
+            selected_game_id = selected_game_obj['id'] if selected_game_obj else None
+
+            # Detect change and reset
+            if selected_provider != st.session_state.provider or selected_game_name != st.session_state.game:
+                st.session_state.provider = selected_provider
+                st.session_state.game = selected_game_name
+                st.session_state.game_id = selected_game_id
+                st.session_state.game_cfg = selected_game_obj
+                reset_shoe_state()
+                fetch_stats()
+                fetch_model_info()
+                st.rerun()
+
+        st.markdown(f"**Provider:** {st.session_state.provider or '—'}  |  **Game:** {st.session_state.game or '—'}")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with st.container():
@@ -564,8 +623,10 @@ with left_col:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.subheader("📈 Model Training Info")
         mi = st.session_state.get("model_info") or {}
-        games = mi.get("games", {}) if isinstance(mi, dict) else {}
-        g = games.get(st.session_state.game, {}) if isinstance(games, dict) else {}
+        games_mi = mi.get("games", {}) if isinstance(mi, dict) else {}
+        # Use game_id for lookup (e.g. "pragmatic_baccarat")
+        current_game_id = st.session_state.game_id or ""
+        g = games_mi.get(current_game_id, {}) if isinstance(games_mi, dict) else {}
         if g:
             st.write(f"**Hands Loaded:** {g.get('hands_loaded', 'N/A')}  |  **Shoes Loaded:** {g.get('shoes_loaded', 'N/A')}")
             rf = g.get("rf", {}) or {}
@@ -576,13 +637,12 @@ with left_col:
             if note:
                 st.caption(note)
         else:
-            st.write("Model info not available (backend may not have `/model_info`).")
+            st.write("Model info not available.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with st.container():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.subheader("🧬 Live Shoe DNA")
-        # Backend JSON converts dict keys to strings; normalize to int for lookups below.
         _stk_raw = st.session_state.dna_stats.get('streak', {}) or {}
         _zz_raw = st.session_state.dna_stats.get('zigzag', {}) or {}
         try:
@@ -598,10 +658,10 @@ with left_col:
         else:
             st.write("🔥 **STREAK HEALTH**")
             any_streak = False
-            for length in range(1,5):
+            for length in range(1, 5):
                 if length in stk:
                     d = stk[length]
-                    total = d.get('flip',0) + d.get('streak',0)
+                    total = d.get('flip', 0) + d.get('streak', 0)
                     if total > 0:
                         flip_pct = d['flip'] / total * 100
                         color = "red" if flip_pct > 50 else "green"
@@ -611,10 +671,10 @@ with left_col:
                 st.write("No clear streak patterns yet.")
             st.write("⚡ **ZIGZAG HEALTH**")
             any_zz = False
-            for length in range(2,6):
+            for length in range(2, 6):
                 if length in zz:
                     d = zz[length]
-                    total = d.get('break',0) + d.get('cont',0)
+                    total = d.get('break', 0) + d.get('cont', 0)
                     if total > 0:
                         break_pct = d['break'] / total * 100
                         color = "#00ccff" if break_pct > 50 else "red"
@@ -630,60 +690,56 @@ with left_col:
         st.session_state.base_bet = st.number_input("Base Bet", value=st.session_state.base_bet, step=5.0, label_visibility="collapsed")
         st.session_state.use_lstm = st.checkbox("Enable LSTM", value=st.session_state.use_lstm)
         if st.button("🗑️ RESET SHOE"):
-            st.session_state.history = []
-            st.session_state.recent_results = []
-            st.session_state.profit_loss_units = 0
-            st.session_state.last_prediction = None
+            reset_shoe_state()
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Add a manual test connection button
     with st.container():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.subheader("🔌 Connection Test")
         if st.button("Test Backend Connection"):
             test_connection()
+        if st.button("🔄 Refresh Games List"):
+            fetch_games()
+            st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
 # ==================== MIDDLE COLUMN (BEAD PLATE + BUTTONS) ====================
 with mid_col:
+    cfg = get_current_cfg()
+
     with st.container():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.subheader("📿 Bead Plate")
-        render_bead_plate(st.session_state.history, st.session_state.game)
+        render_bead_plate(st.session_state.history, cfg)
         st.markdown("</div>", unsafe_allow_html=True)
 
     with st.container():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.subheader("🎮 INPUT")
-        # Custom outcome buttons
-        col1, col2, col3 = st.columns(3)
-        if st.session_state.game == "Baccarat":
-            with col1:
-                if st.button("🔴 B", use_container_width=True):
-                    record_and_fetch("B")
-                    st.rerun()
-            with col2:
-                if st.button("🔵 P", use_container_width=True):
-                    record_and_fetch("P")
-                    st.rerun()
-            with col3:
-                if st.button("🟢 T", use_container_width=True):
-                    record_and_fetch("T")
-                    st.rerun()
+
+        if cfg is None:
+            st.info("Select a provider and game to start.")
         else:
-            with col1:
-                if st.button("🔴 Red", use_container_width=True):
-                    record_and_fetch("R")
-                    st.rerun()
-            with col2:
-                if st.button("⚫ Black", use_container_width=True):
-                    record_and_fetch("B")
-                    st.rerun()
-            with col3:
-                if st.button("🟢 Green", use_container_width=True):
-                    record_and_fetch("G")
-                    st.rerun()
+            # Dynamic outcome buttons based on game config
+            button_labels = cfg.get('button_labels', [])
+            allowed_chars = cfg.get('allowed_chars', [])
+            num_buttons = len(button_labels)
+
+            if num_buttons == 0:
+                st.warning("No button configuration found for this game.")
+            else:
+                # Render in rows of up to 3 buttons
+                for row_start in range(0, num_buttons, 3):
+                    row_labels = button_labels[row_start:row_start + 3]
+                    row_chars = allowed_chars[row_start:row_start + 3]
+                    cols = st.columns(len(row_labels))
+                    for col, label, char in zip(cols, row_labels, row_chars):
+                        with col:
+                            if st.button(label, use_container_width=True, key=f"btn_{char}"):
+                                record_and_fetch(char)
+                                st.rerun()
+
         st.markdown("</div>", unsafe_allow_html=True)
 
     with st.container():
@@ -744,13 +800,12 @@ with right_col:
 
             with st.expander("🧠 AI Models", expanded=True):
                 st.write(f"**RF Pattern AI:** {data.get('ai_pred', 'None')} (Conf: {data.get('ai_conf', 0):.1f}%)")
-                # LSTM info
                 lstm_pred = data.get('lstm_pred')
                 lstm_conf = data.get('lstm_conf', 0.0)
                 if lstm_pred is not None:
                     st.write(f"**LSTM:** {lstm_pred} (Conf: {lstm_conf:.1f}%)")
                 else:
-                    st.write(f"**LSTM:** {'Enabled' if st.session_state.use_lstm else 'Disabled'}")
+                    st.write(f"**LSTM:** {'Warming up...' if st.session_state.use_lstm else 'Disabled'}")
             ai_msg = data.get('ai_msg', 'N/A')
             st.info(f"🤖 Q-Learning: {ai_msg}")
             st.markdown("</div>", unsafe_allow_html=True)
@@ -758,6 +813,8 @@ with right_col:
     with st.container():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.subheader("📝 Manual Record")
+        cfg = get_current_cfg()
+        allowed = cfg.get('allowed_chars', []) if cfg else []
         col_w, col_l, col_tie = st.columns(3)
         with col_w:
             if st.button("✅ Win", use_container_width=True):
@@ -765,12 +822,10 @@ with right_col:
                     last = st.session_state.last_prediction
                     kelly_units = last.get('kelly_amount', 0)
                     if kelly_units > 0:
-                        game = st.session_state.game
                         bet = last.get('bet')
-                        if game == "Baccarat" and bet == 'B':
+                        # Banker commission for first-symbol bets
+                        if allowed and bet == allowed[0]:
                             profit = kelly_units * 0.95
-                        elif game == "Roulette" and bet == 'G':
-                            profit = kelly_units * 35
                         else:
                             profit = kelly_units
                         st.session_state.profit_loss_units += profit
@@ -784,11 +839,11 @@ with right_col:
                     st.session_state.recent_results.append(0)
                 st.rerun()
         with col_tie:
-            if st.session_state.game == "Baccarat":
-                if st.button("🔄 Tie", use_container_width=True):
+            # Show "Push/Tie" button if game has a 3rd symbol (Tie/Green/etc.)
+            if len(allowed) >= 3:
+                if st.button("🔄 Push/Tie", use_container_width=True):
                     st.session_state.recent_results.append(2)
                     st.rerun()
             else:
-                # Optionally leave an empty placeholder to keep column layout
                 st.empty()
         st.markdown("</div>", unsafe_allow_html=True)
