@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import threading
 
-API_BASE = "https://king63500-unicorn.hf.space"
+API_BASE = "https://king63500-unicorn-experiment.hf.space"
 
 # ---- Silent keep-alive ping (prevents HF Space from sleeping) ----
 def _background_ping():
@@ -251,11 +251,29 @@ if 'health' not in st.session_state:
 if 'model_info' not in st.session_state:
     st.session_state.model_info = None
 
+# Shield & Strike states
+if 'betting_state' not in st.session_state:
+    st.session_state.betting_state = "warmup"  # warmup, demo, real
+if 'demo_pl' not in st.session_state:
+    st.session_state.demo_pl = 0.0
+
 # Optimization: Connection Pooling for faster API calls
 if 'http_session' not in st.session_state:
     st.session_state.http_session = requests.Session()
-if 'model_info' not in st.session_state:
-    st.session_state.model_info = None
+
+# Session limits and discipline
+if 'session_target' not in st.session_state:
+    st.session_state.session_target = 200   # units में profit target
+if 'session_stop_loss' not in st.session_state:
+    st.session_state.session_stop_loss = -100  # units में stop loss
+if 'trading_active' not in st.session_state:
+    st.session_state.trading_active = True
+if 'cooldown' not in st.session_state:
+    st.session_state.cooldown = 0
+if 'loss_streak' not in st.session_state:
+    st.session_state.loss_streak = 0
+if 'win_streak' not in st.session_state:
+    st.session_state.win_streak = 0
 
 # -------------------- HELPER FUNCTIONS --------------------
 
@@ -426,38 +444,179 @@ def render_bead_plate(history, cfg):
     """
     st.markdown(html, unsafe_allow_html=True)
 
+
+def report_bet_to_backend(profit, w_before, l_before):
+    """Unified function to report bet results to the Super Brain"""
+    if not st.session_state.history:
+        return
+
+    # 1. Purana aur naya data calculate karein
+    hist_after = st.session_state.history
+    hist_before = hist_after[:-1] if len(hist_after) > 0 else []
+    
+    # 2. Last prediction se component_action uthayein
+    last_pred = st.session_state.get("last_prediction", {})
+    comp_act = last_pred.get("component_action", -1)
+    ai_action = last_pred.get("ai_action", -1)
+    # Action name (e.g. 'paroli', 'martingale')
+    active_strategy = last_pred.get("strategy_name", "flat") 
+
+    payload = {
+        "game_id": st.session_state.game_id,
+        "history_before": hist_before,
+        "win_streak_before": w_before,
+        "loss_streak_before": l_before,
+        "action": str(active_strategy),
+        "reward": float(profit),
+        "history_after": hist_after,
+        "win_streak_after": st.session_state.win_streak,
+        "loss_streak_after": st.session_state.loss_streak,
+        "component_action": int(comp_act),
+        "q_action": int(ai_action)
+    }
+
+    try:
+        res = st.session_state.http_session.post(f"{API_BASE}/report_bet", json=payload, timeout=5)
+        if res.status_code == 200:
+            st.toast("✅ Profit/Loss Reported to AI")
+    except Exception as e:
+        st.error(f"❌ API Error: {e}")
+
 def record_and_fetch(outcome):
-    """Record outcome, update P&L, fetch new prediction."""
+    """Record outcome, update P&L based on betting state, fetch new prediction."""
+   
+
     last = st.session_state.last_prediction
+    if last:
+        component_action = last.get('component_action', -1)
+        if component_action == 6:  # SKIP
+            st.session_state.history.append(outcome)
+            fetch_prediction()
+            fetch_dna()
+            return
+    else:
+        component_action = -1
+
+    # Determine profit and outcome type
+    profit = 0.0
+    outcome_type = None  # 1=win, 0=loss, 2=tie
     if last and last.get('bet'):
         bet = last['bet']
         kelly = last.get('kelly_amount', 0)
         if outcome == bet:
-            # Win — Banker commission only for Baccarat-like games
+            profit = kelly
             cfg = get_current_cfg()
             allowed = cfg.get('allowed_chars', []) if cfg else []
-            if bet == allowed[0] if allowed else False:  # First symbol = Banker equivalent
+            if bet == allowed[0] if allowed else False:
                 profit = kelly * 0.95
-            else:
-                profit = kelly
-            st.session_state.profit_loss_units += profit
-            st.session_state.recent_results.append(1)
+            outcome_type = 1
         else:
-            # Check for push/tie: if outcome is the 3rd symbol and game has 3 symbols
             cfg = get_current_cfg()
             allowed = cfg.get('allowed_chars', []) if cfg else []
             if len(allowed) >= 3 and outcome == allowed[2]:
-                # 3rd symbol = Tie/Push in baccarat, Green in roulette → push (no P&L)
-                st.session_state.recent_results.append(2)
+                profit = 0.0
+                outcome_type = 2
             else:
-                st.session_state.profit_loss_units -= kelly
-                st.session_state.recent_results.append(0)
+                profit = -kelly
+                outcome_type = 0
     else:
-        pass  # No prediction → just record outcome
+        # No prediction, just record outcome
+        st.session_state.history.append(outcome)
+        fetch_prediction()
+        fetch_dna()
+        return
 
+    # Capture before streaks for reporting
+    w_before = st.session_state.win_streak
+    l_before = st.session_state.loss_streak
+
+    # Update streaks based on outcome_type
+    if outcome_type == 1:
+        st.session_state.recent_results.append(1)
+        st.session_state.loss_streak = 0
+        st.session_state.win_streak += 1
+    elif outcome_type == 0:
+        st.session_state.recent_results.append(0)
+        st.session_state.loss_streak += 1
+        st.session_state.win_streak = 0
+      
+    elif outcome_type == 2:
+        st.session_state.recent_results.append(2)
+        st.session_state.loss_streak = 0
+        st.session_state.win_streak = 0
+
+    # Update P&L based on state
+    if st.session_state.betting_state == "warmup":
+        pass  # no P&L update
+    elif st.session_state.betting_state == "demo":
+        st.session_state.demo_pl += profit
+    elif st.session_state.betting_state == "real":
+        st.session_state.profit_loss_units += profit
+        # Report to backend only in real mode
+        if profit != 0 or outcome_type == 2:
+            report_bet_to_backend(profit, w_before, l_before)
+
+    # Append outcome to history
     st.session_state.history.append(outcome)
+
+    # Transition from warmup to demo if needed
+    if st.session_state.betting_state == "warmup" and len(st.session_state.history) >= 10:
+        st.session_state.betting_state = "demo"
+        st.success("🎭 System now in Demo Mode. Watch virtual P&L before going real.")
+
+    # Auto-revert from real to demo on 3 consecutive losses
+    if st.session_state.betting_state == "real" and st.session_state.loss_streak >= 3:
+        st.session_state.betting_state = "demo"
+        st.warning("⚠️ 3 consecutive losses in Real Mode. Auto-reverted to Demo Mode for safety.")
+
     fetch_prediction()
     fetch_dna()
+
+    # Trailing stop logic (only for real mode)
+    if st.session_state.betting_state == "real":
+        flip_rate = 50
+        if st.session_state.last_prediction:
+            pass
+            debug = st.session_state.last_prediction.get('debug_info', {})
+            flip_rate = debug.get('score', 50)
+        TRAILING_DISTANCE = 50
+        WIN_STREAK_BONUS_PER = 25
+        MAX_TARGET_MULTIPLIER = 2.0
+        base_target = st.session_state.session_target
+        base_stop = st.session_state.session_stop_loss
+        current_profit = st.session_state.profit_loss_units
+        win_streak = st.session_state.win_streak
+        
+        if st.button("🚀 Start Real Betting", use_container_width=True):
+            try:
+                resp = st.session_state.http_session.post(f"{API_BASE}/switch_to_real", json={"game_id": st.session_state.game_id})
+                if resp.status_code == 200:
+                    st.session_state.betting_state = "real"
+                    st.success("Now in Real Mode! Actual money will be affected.")
+                else:
+                    st.error("Failed to switch to Real Mode. Try again.")
+            except Exception as e:
+                st.error(f"Error: {e}")
+            st.rerun()
+
+        if current_profit > 0:
+            trailing_stop = current_profit - TRAILING_DISTANCE
+            effective_stop = max(trailing_stop, base_stop)
+        else:
+            effective_stop = base_stop
+        if flip_rate < 40 and win_streak >= 2:
+            dynamic_target = base_target + (win_streak * WIN_STREAK_BONUS_PER)
+        elif flip_rate > 60 and win_streak >= 3:
+            dynamic_target = base_target - 25
+        else:
+            dynamic_target = base_target
+        dynamic_target = min(dynamic_target, base_target * MAX_TARGET_MULTIPLIER)
+        if current_profit >= dynamic_target:
+            st.session_state.trading_active = False
+            st.warning(f"🎯 Dynamic target of {dynamic_target:.0f} units achieved! Stopping.")
+        elif current_profit <= effective_stop:
+            st.session_state.trading_active = False
+            st.error(f"🛑 Trailing stop hit at {effective_stop:.0f} units!")
 
 def get_win_streak():
     streak = 0
@@ -478,12 +637,17 @@ def get_loss_streak():
     return streak
 
 def reset_shoe_state():
-    """Reset per-shoe session state when game changes."""
+    """Reset per-shoe session state when game changes or manual reset."""
     st.session_state.history = []
     st.session_state.recent_results = []
-    st.session_state.profit_loss_units = 0
+    st.session_state.profit_loss_units = 0  # real P&L
+    st.session_state.demo_pl = 0.0
+    st.session_state.betting_state = "warmup"
     st.session_state.last_prediction = None
     st.session_state.dna_stats = {"streak": {}, "zigzag": {}}
+    st.session_state.trading_active = True
+    st.session_state.loss_streak = 0
+    st.session_state.win_streak = 0
 
 # -------------------- INITIAL FETCH --------------------
 fetch_health()
@@ -686,9 +850,25 @@ with left_col:
 
     with st.container():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.subheader("💰 Base Bet ($)")
-        st.session_state.base_bet = st.number_input("Base Bet", value=st.session_state.base_bet, step=5.0, label_visibility="collapsed")
+        st.subheader("💰 Base Bet & Limits")
+        st.session_state.base_bet = st.number_input("Base Bet ($)", value=st.session_state.base_bet, step=5.0)
         st.session_state.use_lstm = st.checkbox("Enable LSTM", value=st.session_state.use_lstm)
+        
+        st.session_state.session_target = st.number_input(
+            "Profit Target (units)",
+            value=st.session_state.session_target,
+            step=10,
+            min_value=0,
+            help="जब यूनिट्स में प्रॉफिट इससे ज्यादा हो जाए तो रुक जाएँ"
+        )
+        st.session_state.session_stop_loss = st.number_input(
+            "Stop Loss (units)",
+            value=st.session_state.session_stop_loss,
+            step=10,
+            max_value=0,
+            help="जब यूनिट्स में नुकसान इससे ज्यादा हो जाए तो रुक जाएँ (नेगेटिव वैल्यू)"
+        )
+        
         if st.button("🗑️ RESET SHOE"):
             reset_shoe_state()
             st.rerun()
@@ -736,9 +916,10 @@ with mid_col:
                     cols = st.columns(len(row_labels))
                     for col, label, char in zip(cols, row_labels, row_chars):
                         with col:
-                            if st.button(label, use_container_width=True, key=f"btn_{char}"):
-                                record_and_fetch(char)
-                                st.rerun()
+                            if st.button(label, use_container_width=True, key=f"btn_{char}", disabled=not st.session_state.trading_active):
+                                if st.session_state.trading_active:
+                                    record_and_fetch(char)
+                                    st.rerun()
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -767,8 +948,22 @@ with right_col:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.subheader("📊 Live Details")
         with st.expander("💰 P&L (Units)", expanded=True):
-            pl_color = "value-positive" if st.session_state.profit_loss_units >= 0 else "value-negative"
-            st.markdown(f"<div class='metric-card'><span class='label'>Net Profit/Loss</span><div class='value {pl_color}'>{st.session_state.profit_loss_units:.2f} units</div></div>", unsafe_allow_html=True)
+            # Show current mode with badge
+            mode_text = {
+                "warmup": "🔴 Warm-up (no bets)",
+                "demo": "🎭 Demo Mode",
+                "real": "⚡ Real Mode"
+            }.get(st.session_state.betting_state, "Unknown")
+            st.markdown(f"**Mode:** {mode_text}")
+            
+            # Demo P&L
+            demo_color = "value-positive" if st.session_state.demo_pl >= 0 else "value-negative"
+            st.markdown(f"<div class='metric-card'><span class='label'>Demo P&L</span><div class='value {demo_color}'>{st.session_state.demo_pl:.2f} units</div></div>", unsafe_allow_html=True)
+            
+            # Real P&L
+            real_color = "value-positive" if st.session_state.profit_loss_units >= 0 else "value-negative"
+            st.markdown(f"<div class='metric-card'><span class='label'>Real P&L</span><div class='value {real_color}'>{st.session_state.profit_loss_units:.2f} units</div></div>", unsafe_allow_html=True)
+            
             st.write(f"**Win Streak:** {get_win_streak()}")
             st.write(f"**Loss Streak:** {get_loss_streak()}")
             if st.session_state.recent_results:
@@ -777,6 +972,15 @@ with right_col:
                 st.write(f"**Last 5 Pattern:** {pattern}")
             else:
                 st.write("**Last 5 Pattern:** (none)")
+
+    # Show "Start Real Betting" button only in demo mode
+    if st.session_state.betting_state == "demo":
+        if st.button("🚀 Start Real Betting", use_container_width=True):
+            # Yahan backend call bhi kar sakte ho agar /switch_to_real endpoint ho
+            # Abhi sirf frontend state change kar rahe hain
+            st.session_state.betting_state = "real"
+            st.success("Now in Real Mode! Actual money will be affected.")
+            st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
     if st.session_state.last_prediction:
@@ -789,7 +993,10 @@ with right_col:
                 st.success(f"**{bet}** (Conf: {data.get('confidence',0):.1f}%)")
             else:
                 st.warning("**SKIP** (No edge)")
-            st.info(f"💰 Kelly (units): {data.get('kelly_amount', 0):.1f} | 🎯 Strategy: {data.get('strategy_name','')}")
+            
+            boost = data.get('boost_factor', 1.0)
+            boost_text = f" 🚀 (DQN Boost: x{boost:.2f})" if boost != 1.0 else ""
+            st.info(f"💰 Kelly (units): {data.get('kelly_amount', 0):.1f}{boost_text} | 🎯 Strategy: {data.get('strategy_name','')}")
 
             with st.expander("🔍 Analyzer", expanded=True):
                 st.write(f"**Market Mode:** {debug.get('market', 'N/A')}")
@@ -808,6 +1015,25 @@ with right_col:
                     st.write(f"**LSTM:** {'Warming up...' if st.session_state.use_lstm else 'Disabled'}")
             ai_msg = data.get('ai_msg', 'N/A')
             st.info(f"🤖 Q-Learning: {ai_msg}")
+
+            # 🆕 Component selector info
+            comp_action = data.get('component_action', -1)
+            if comp_action != -1:
+                action_map = {
+                    0: "Analyzer (Base)",
+                    1: "Analyzer (Boost)",
+                    2: "LSTM (Base)",
+                    3: "LSTM (Boost)",
+                    4: "RF (Base)",
+                    5: "RF (Boost)",
+                    6: "SKIP"
+                }
+                display_text = action_map.get(comp_action, f"Unknown ({comp_action})")
+                st.info(f"🎯 **Component Selector:** {display_text}")
+            
+            boost = data.get('boost_factor', 1.0)
+            if boost != 1.0:
+                st.success(f"🚀 **DQN Booster Active!** Multiplier: **x{boost:.2f}**")
             st.markdown("</div>", unsafe_allow_html=True)
 
     with st.container():
@@ -817,32 +1043,80 @@ with right_col:
         allowed = cfg.get('allowed_chars', []) if cfg else []
         col_w, col_l, col_tie = st.columns(3)
         with col_w:
-            if st.button("✅ Win", use_container_width=True):
-                if st.session_state.last_prediction:
+            if st.button("✅ Win", use_container_width=True, disabled=not st.session_state.trading_active):
+                if st.session_state.last_prediction and st.session_state.last_prediction.get('bet'):
                     last = st.session_state.last_prediction
                     kelly_units = last.get('kelly_amount', 0)
-                    if kelly_units > 0:
-                        bet = last.get('bet')
-                        # Banker commission for first-symbol bets
-                        if allowed and bet == allowed[0]:
-                            profit = kelly_units * 0.95
-                        else:
-                            profit = kelly_units
+                    bet = last.get('bet')
+                    # Calculate profit
+                    if allowed and bet == allowed[0]:
+                        profit = kelly_units * 0.95
+                    else:
+                        profit = kelly_units
+                    # Capture before streaks
+                    w_before = st.session_state.win_streak
+                    l_before = st.session_state.loss_streak
+                    # Update streaks
+                    st.session_state.recent_results.append(1)
+                    st.session_state.loss_streak = 0
+                    st.session_state.win_streak += 1
+                    # Update P&L based on state
+                    if st.session_state.betting_state == "demo":
+                        st.session_state.demo_pl += profit
+                    elif st.session_state.betting_state == "real":
                         st.session_state.profit_loss_units += profit
-                        st.session_state.recent_results.append(1)
+                        report_bet_to_backend(profit, w_before, l_before)
+                    # Append outcome to history
+                    st.session_state.history.append(bet)
+                    fetch_prediction()
+                    fetch_dna()
                 st.rerun()
         with col_l:
-            if st.button("❌ Loss", use_container_width=True):
-                if st.session_state.last_prediction:
-                    kelly_units = st.session_state.last_prediction.get('kelly_amount', 0)
-                    st.session_state.profit_loss_units -= kelly_units
+            if st.button("❌ Loss", use_container_width=True, disabled=not st.session_state.trading_active):
+                if st.session_state.last_prediction and st.session_state.last_prediction.get('bet'):
+                    last = st.session_state.last_prediction
+                    kelly_units = last.get('kelly_amount', 0)
+                    profit = -kelly_units
+                    w_before = st.session_state.win_streak
+                    l_before = st.session_state.loss_streak
                     st.session_state.recent_results.append(0)
+                    st.session_state.loss_streak += 1
+                    st.session_state.win_streak = 0
+                    if st.session_state.loss_streak >= 3:
+                        st.session_state.cooldown = 2
+                    # Determine outcome symbol (opposite of bet)
+                    bet = last.get('bet')
+                    allowed = cfg.get('allowed_chars', [])
+                    if len(allowed) == 2:
+                        outcome = allowed[0] if allowed[1] == bet else allowed[1]
+                    elif len(allowed) >= 3:
+                        others = [c for c in allowed if c != bet and c != allowed[2]]
+                        outcome = others[0] if others else allowed[0]
+                    else:
+                        outcome = '?'
+                    st.session_state.history.append(outcome)
+                    if st.session_state.betting_state == "demo":
+                        st.session_state.demo_pl += profit
+                    elif st.session_state.betting_state == "real":
+                        st.session_state.profit_loss_units += profit
+                        report_bet_to_backend(profit, w_before, l_before)
+                    fetch_prediction()
+                    fetch_dna()
                 st.rerun()
         with col_tie:
-            # Show "Push/Tie" button if game has a 3rd symbol (Tie/Green/etc.)
             if len(allowed) >= 3:
-                if st.button("🔄 Push/Tie", use_container_width=True):
+                if st.button("🔄 Push/Tie", use_container_width=True, disabled=not st.session_state.trading_active):
+                    tie_symbol = allowed[2]
+                    w_before = st.session_state.win_streak
+                    l_before = st.session_state.loss_streak
                     st.session_state.recent_results.append(2)
+                    st.session_state.loss_streak = 0
+                    st.session_state.win_streak = 0
+                    st.session_state.history.append(tie_symbol)
+                    if st.session_state.betting_state == "real":
+                        report_bet_to_backend(0.0, w_before, l_before)
+                    fetch_prediction()
+                    fetch_dna()
                     st.rerun()
             else:
                 st.empty()
